@@ -26,9 +26,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
-#if defined(__linux__) || !defined(NANO_TINY)
-#include <sys/ioctl.h>
-#endif
 #ifdef ENABLE_UTF8
 #include <langinfo.h>
 #endif
@@ -41,6 +38,7 @@
 #ifdef __linux__
 #include <sys/vt.h>
 #endif
+#include <shlobj.h>
 
 #ifdef ENABLE_MULTIBUFFER
 #define read_them_all TRUE
@@ -423,8 +421,6 @@ void emergency_save(const char *die_filename, struct stat *die_stat)
 	 * but ignore any failure as we are in a hurry to get out. */
 	if (die_stat) {
 		IGNORE_CALL_RESULT(chmod(targetname, die_stat->st_mode));
-		IGNORE_CALL_RESULT(chown(targetname, die_stat->st_uid,
-												die_stat->st_gid));
 	}
 #endif
 
@@ -899,7 +895,7 @@ void restore_handler_for_Ctrl_C(void)
 /* Reconnect standard input to the tty, and store its state. */
 void reconnect_and_store_state(void)
 {
-	int thetty = open("/dev/tty", O_RDONLY);
+	int thetty = open("CONIN$", O_RDONLY);
 
 	if (thetty < 1)
 		die(_("Could not reconnect stdin to keyboard\n"));
@@ -915,6 +911,7 @@ void reconnect_and_store_state(void)
 /* Read whatever comes from standard input into a new buffer. */
 bool scoop_stdin(void)
 {
+	int fd;
 	FILE *stream;
 
 	restore_terminal();
@@ -925,9 +922,12 @@ bool scoop_stdin(void)
 							"type ^D or ^D^D to finish.\n"));
 
 	/* Open standard input. */
-	stream = fopen("/dev/stdin", "rb");
+	fd = dup(0);
+	stream = fdopen(fd, "rb");
 	if (stream == NULL) {
 		int errnumber = errno;
+		if(fd != -1)
+			close(fd);
 
 		terminal_init();
 		doupdate();
@@ -972,12 +972,6 @@ void signal_init(void)
 	sigaction(SIGHUP, &deed, NULL);
 #endif
 	sigaction(SIGTERM, &deed, NULL);
-
-#ifndef NANO_TINY
-	/* Trap SIGWINCH because we want to handle window resizes. */
-	deed.sa_handler = handle_sigwinch;
-	sigaction(SIGWINCH, &deed, NULL);
-#endif
 
 	if (ISSET(SUSPENDABLE)) {
 		/* Block all other signals in the suspend and continue handlers.
@@ -1029,24 +1023,7 @@ RETSIGTYPE handle_crash(int signal)
 /* Handler for SIGTSTP (suspend). */
 RETSIGTYPE do_suspend(int signal)
 {
-#ifdef ENABLE_MOUSE
-	disable_mouse_support();
-#endif
-	restore_terminal();
-
-	printf("\n\n");
-
-	/* Display our helpful message. */
-	printf(_("Use \"fg\" to return to nano.\n"));
-	fflush(stdout);
-
-	/* The suspend keystroke must not elicit cursor-position display. */
-	suppress_cursorpos=TRUE;
-
-#ifdef SIGSTOP
-	/* Do what mutt does: send ourselves a SIGSTOP. */
-	kill(0, SIGSTOP);
-#endif
+	statusbar(_("Not supported on Windows yet"));
 }
 
 /* Put nano to sleep (if suspension is enabled). */
@@ -1083,12 +1060,6 @@ RETSIGTYPE do_continue(int signal)
 /* Block or unblock the SIGWINCH signal, depending on the blockit parameter. */
 void block_sigwinch(bool blockit)
 {
-	sigset_t winch;
-
-	sigemptyset(&winch);
-	sigaddset(&winch, SIGWINCH);
-	sigprocmask(blockit ? SIG_BLOCK : SIG_UNBLOCK, &winch, NULL);
-
 #ifndef NANO_TINY
 	if (the_window_resized)
 		regenerate_screen();
@@ -1107,22 +1078,8 @@ RETSIGTYPE handle_sigwinch(int signal)
 /* Reinitialize and redraw the screen completely. */
 void regenerate_screen(void)
 {
-	const char *tty = ttyname(0);
-	int fd, result = 0;
-	struct winsize win;
-
 	/* Reset the trigger. */
 	the_window_resized = FALSE;
-
-	if (tty == NULL)
-		return;
-	fd = open(tty, O_RDWR);
-	if (fd == -1)
-		return;
-	result = ioctl(fd, TIOCGWINSZ, &win);
-	close(fd);
-	if (result == -1)
-		return;
 
 	/* We could check whether COLS or LINES changed, and return otherwise,
 	 * but it seems curses does not always update these global variables. */
@@ -1729,7 +1686,7 @@ void inject(char *burst, size_t count)
 
 int main(int argc, char **argv)
 {
-	int stdin_flags, optchr;
+	int optchr;
 #ifdef ENABLE_NANORC
 	bool ignore_rcfiles = FALSE;
 		/* Whether to ignore the nanorc files. */
@@ -1841,11 +1798,6 @@ int main(int argc, char **argv)
 
 	/* Back up the terminal settings so that they can be restored. */
 	tcgetattr(0, &original_state);
-
-	/* Get the state of standard input and ensure it uses blocking mode. */
-	stdin_flags = fcntl(0, F_GETFL, 0);
-	if (stdin_flags != -1)
-		fcntl(0, F_SETFL, stdin_flags & ~O_NONBLOCK);
 
 #ifdef ENABLE_UTF8
 	/* If setting the locale is successful and it uses UTF-8, we need
